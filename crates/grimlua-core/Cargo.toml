@@ -1,0 +1,15 @@
+[package]
+name = "grimlua-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# An rlib, deliberately: nothing here knows how the DLL was loaded. The proxy
+# crate is a thin shim, so swapping dinput8 for a CrashReport proxy or a
+# launcher-plus-injector is a new sibling crate rather than a refactor.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+retour = "0.4.0-alpha.4"
+windows-sys.workspace = true

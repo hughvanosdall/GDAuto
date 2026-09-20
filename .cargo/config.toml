@@ -1,0 +1,15 @@
+[target.x86_64-pc-windows-msvc]
+# Statically link the CRT.
+#
+# Grim Dawn ships its own x64\ucrtbase.dll from 2017 (10.0.14393.795), and the
+# loader searches the application directory before System32 -- so a dynamically
+# linked DLL of ours binds its CRT imports to that 2017 UCRT while picking up
+# VCRUNTIME140.dll (which the game does not ship) from System32 at a 2026
+# version. That pairing is unsupported, and when it fails it takes the process
+# down with no dialog, no WER report and no crash dump.
+#
+# Linking the CRT statically removes the ucrtbase and VCRUNTIME140 imports
+# entirely, so grimlua runs on its own CRT and cannot be perturbed by whatever
+# the host process happens to ship. For code injected into someone else's
+# process this is the right default regardless.
+rustflags = ["-C", "target-feature=+crt-static"]

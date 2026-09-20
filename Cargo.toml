@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/grimlua-core", "crates/grimlua-dinput8"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[workspace.dependencies]
+grimlua-core = { path = "crates/grimlua-core" }
+
+[workspace.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+]
+
+# Unwinding across the FFI boundary into the game's C++ frames is undefined
+# behaviour, and a panic that reached the frame hook would take the process
+# with it -- which for a hardcore character means a deleted save. Abort so a
+# bug cannot unwind into Grim Dawn.
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+codegen-units = 1
+strip = false      # keep symbols; we attach a debugger to this
+
+[profile.dev]
+panic = "abort"

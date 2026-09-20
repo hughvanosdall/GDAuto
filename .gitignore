@@ -1,0 +1,6 @@
+/target/
+__pycache__/
+*.pyc
+
+# Written into the game directory, never here, but guard against a stray copy.
+grimlua.log

@@ -1,0 +1,22 @@
+[package]
+name = "grimlua-dinput8"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Ships as `x64\dinput8.dll` in the Grim Dawn directory.
+[lib]
+name = "dinput8"
+crate-type = ["cdylib"]
+
+[features]
+default = ["full"]
+# The real build: grimlua-core is linked in and initialised.
+full = ["dep:grimlua-core"]
+# Pure passthrough for diagnosis -- no logging, no file I/O, no std on the
+# DllMain path. Build with --no-default-features --features minimal.
+minimal = []
+
+[dependencies]
+grimlua-core = { workspace = true, optional = true }
+windows-sys.workspace = true
