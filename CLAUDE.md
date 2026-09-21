@@ -19,13 +19,16 @@ document, and the affected sections have been rewritten.
 x64/Grim Dawn.exe
 └── dinput8.dll (ours, proxy)
     ├── proxy exports ──→ real System32\dinput8.dll
-    ├── frame hook ─────  the ONLY thread that touches the game
-    ├── state reader ───  health, energy, UI state, cooldowns
+    ├── frame hook ─────  the ONLY thread that touches the game   [built]
+    │   ├── state reader   life, energy, UI state                  [built]
+    │   ├── safety gate    one veto point for every action         [built]
+    │   └── runtime tick   evaluate, then at most one action       [built]
+    ├── shared state ───  snapshot out, config in; no game pointers [built]
     ├── .arz parser ────  skills, durations, costs, icons
     ├── mlua ───────────  sandboxed priority-list evaluation
-    └── 127.0.0.1:7890
-        ├── HTTP ──────── editor + skill icons
-        └── WebSocket ─── live state out, config in
+    └── 127.0.0.1:7890 ─  own thread, never calls into the game    [built]
+        ├── HTTP ──────── the UI page (+ skill icons later)        [built]
+        └── WebSocket ─── live state out, config in                [built]
 ```
 
 Rust, x64 only. `retour` for detours, `windows-sys` for Win32, `mlua` for Lua,
@@ -180,6 +183,95 @@ struct layouts have had to be reversed at all.
 **Keep an external read mode behind a trait.** ~50 extra lines, and it lets you
 iterate on offsets without restarting the game and gives a safe fallback when
 unsure whether an offset is right. You'll use it constantly during discovery.
+
+## The runtime, as built
+
+Everything below exists and is confirmed in a live game. This is the part to
+read before touching the scripting layer.
+
+### Threads, and the one rule that matters
+
+| Thread | Does | May touch the game |
+|---|---|---|
+| frame hook (`hook.rs`) | the whole runtime tick | **yes — only this one** |
+| `grimlua-server` (`server.rs`) | accept loop on 127.0.0.1:7890 | no |
+| `grimlua-conn` (one per browser) | push snapshots, take config | no |
+| `grimlua-hotkey` (`hotkey.rs`) | Ctrl+Shift+G, opens the UI | no |
+| `grimlua-init` (`lib.rs`) | installs the hook, starts the rest | no |
+
+The server and the hook never call each other. They meet only in `shared.rs`,
+through two locks holding plain data: `SNAPSHOT` (hook writes, server reads)
+and `CONFIG` (server writes, hook reads). Neither holds a game pointer, so a
+wedged browser cannot stall or corrupt the game thread. **Do not add a path
+that lets the server reach a `GameEngine*`.**
+
+### The tick
+
+`runtime::tick(engine, frame)`, every 6 frames (~20Hz at 120fps):
+
+1. read vitals through the game's own `const` accessors
+2. `gate::evaluate` → a `Gate`
+3. if and only if `Gate::Clear`, pick **one** action and perform it
+4. publish a `Snapshot` for the browser
+
+### The gate
+
+`gate::evaluate(engine, last_action) -> Gate`. Blocks on: disarmed, no
+character, UI panel open, game unfocused, global cooldown (default 750ms).
+Only `Gate::Clear` permits an action, and `Gate::Unknown` — returned when the
+UI flag cannot be trusted on the running build — blocks everything.
+
+`armed` defaults to **false on every launch**. A tool that arms itself acts
+before its owner is watching.
+
+### Where the script evaluator plugs in
+
+`runtime::choose_action(&Config, &Vitals) -> Option<Action>` is a hardcoded
+stand-in for the priority list: ordered checks, first match wins, returns at
+most one action. **That signature is the contract mlua has to satisfy.**
+
+Four things the scripting layer must preserve:
+
+1. **A script returns intent, it does not act.** `Action` is a closed enum the
+   host owns. A script names an action; the host validates it and performs it.
+   Scripts never receive a function pointer or a game pointer.
+2. **At most one action per tick.** The gate serialises everything, so
+   "do A then B this tick" is not expressible. Returning a list would be a
+   design error, not a feature.
+3. **The gate runs before the script and cannot be bypassed.** A script is not
+   consulted at all when the gate is closed, so there is no per-call opt-out to
+   forget to check.
+4. **A script that misbehaves must not stall the frame hook.** mlua exposes
+   Lua's debug hook; use it for an instruction-count limit. This runs on the
+   game's render thread — a hang here is a hang in the game.
+
+### Adding an action
+
+1. add a variant to `runtime::Action` and a label for it
+2. resolve the exported game function in `state.rs`'s `game_api!` block
+3. call it from `runtime::perform`
+
+Actions must be **exported game functions**, never synthetic input. The potion
+rules call `PlayerHotSlotCtrl::ActivateHealthPotionSlot`, the same entry point
+the keybind reaches, so the game applies its own rules about cooldowns and
+charges and grimlua cannot make it do anything the player could not. See
+`symbols/ANCHORS.md`.
+
+### Config and hot-apply
+
+The browser sends a whole `Config` over the websocket; `shared::put_config`
+stores it and bumps `CONFIG_REVISION`; the hook reads it on the next tick.
+That is what "no restart, no reload command" means in practice.
+
+### The UI
+
+One page, served from `src/web/index.html` and embedded with `include_str!`.
+Vanilla JS, no build step, no framework. It renders stale data greyed out and
+labelled rather than letting frozen numbers pass as live.
+
+Deliberately **not** shown: DPS and resistances. Both are reachable
+(`Player::CalculateDps`, `Character::GetAllDefenseAttributes`) but are not
+wired, and inventing numbers on a live dashboard is worse than omitting them.
 
 ## The database
 
@@ -359,15 +451,18 @@ Each step proves the previous one. Don't skip ahead to the UI.
    inside the `GetUI()` object found by in-process diffing. **The project's
    only raw offset**, pinned to a build stamp and failing closed on any other.
    See `symbols/ANCHORS.md`
-5. HTTP + websocket streaming live health to a browser tab
+5. **HTTP + websocket** — ✅ confirmed. Also the first step that *acts*:
+   auto-potions run through the gate on the frame hook. Global hotkey
+   (Ctrl+Shift+G) opens the UI, standing in for step 9
 6. `.arz` parser and skill index
 7. mlua and the priority list evaluator
 8. Web editor
 9. Escape menu button
 
 Steps 1–5 are the risky infrastructure and end with something visibly working:
-a browser tab showing your health updating live from inside the game. That's
-the point where the architecture is proven.
+a browser tab showing your health updating live from inside the game. **That
+point has been reached** — the architecture is proven end to end, including a
+real action taken through the safety gate.
 
 Steps 0–4 turned out far cheaper than this list implies, because the export
 table removed nearly all the offset hunting. Step 4 was the first to need any:

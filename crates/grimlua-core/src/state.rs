@@ -48,6 +48,14 @@ game_api!(GameApi {
         = "?GetUI@GameEngine@GAME@@QEBAPEAVGameUIInterface@2@XZ",
     is_transfer_open: unsafe extern "C" fn(*mut c_void) -> u8
         = "?IsTransferOpen@GameEngine@GAME@@QEBA_NXZ",
+    get_hotslot_ctrl: unsafe extern "C" fn(*mut c_void) -> *mut c_void
+        = "?GetPlayerHotSlotCtrl@Player@GAME@@QEAAAEAVPlayerHotSlotCtrl@2@XZ",
+    activate_health_potion: unsafe extern "C" fn(*mut c_void)
+        = "?ActivateHealthPotionSlot@PlayerHotSlotCtrl@GAME@@QEAAXXZ",
+    activate_energy_potion: unsafe extern "C" fn(*mut c_void)
+        = "?ActivateManaPotionSlot@PlayerHotSlotCtrl@GAME@@QEAAXXZ",
+    health_potion_status: unsafe extern "C" fn(*mut c_void) -> i32
+        = "?GetHealthPotionStatus@PlayerHotSlotCtrl@GAME@@QEBA?AW4HotSlotOptionStatus@2@XZ",
     get_current_life: unsafe extern "C" fn(*mut c_void) -> f64
         = "?GetCurrentLife@Character@GAME@@QEBA?BNXZ",
     get_life_limit: unsafe extern "C" fn(*mut c_void) -> f32
@@ -187,6 +195,55 @@ pub unsafe fn any_ui_open(engine: *mut c_void) -> Option<bool> {
     let panel = ui_panel_open(engine)?;
     let transfer = transfer_open(engine)?;
     Some(panel || transfer)
+}
+
+/// The player's hot-slot bar, which owns the potion buttons.
+///
+/// # Safety
+/// As [`main_player`].
+pub unsafe fn hotslot_ctrl(engine: *mut c_void) -> Option<*mut c_void> {
+    let api = api()?;
+    let player = main_player(engine)?;
+    let ctrl = (api.get_hotslot_ctrl)(player);
+    (!ctrl.is_null()).then_some(ctrl)
+}
+
+/// Press the game's own health-potion button.
+///
+/// This is deliberately *not* synthetic input. `ActivateHealthPotionSlot` is
+/// the same entry point the keybind reaches, so the game applies its own
+/// rules about cooldowns, charges and whether a potion is even slotted. We
+/// cannot make it do something the player could not.
+///
+/// # Safety
+/// Must run on the frame-hook thread, with the gate already satisfied.
+pub unsafe fn drink_health_potion(engine: *mut c_void) -> bool {
+    let Some(api) = api() else { return false };
+    let Some(ctrl) = hotslot_ctrl(engine) else { return false };
+    (api.activate_health_potion)(ctrl);
+    true
+}
+
+/// Press the game's own energy-potion button. See [`drink_health_potion`].
+///
+/// # Safety
+/// As [`drink_health_potion`].
+pub unsafe fn drink_energy_potion(engine: *mut c_void) -> bool {
+    let Some(api) = api() else { return false };
+    let Some(ctrl) = hotslot_ctrl(engine) else { return false };
+    (api.activate_energy_potion)(ctrl);
+    true
+}
+
+/// Raw `HotSlotOptionStatus` for the health slot. The enum's meaning is not
+/// yet known, so this is logged for study rather than acted on.
+///
+/// # Safety
+/// As [`main_player`].
+pub unsafe fn health_potion_status(engine: *mut c_void) -> Option<i32> {
+    let api = api()?;
+    let ctrl = hotslot_ctrl(engine)?;
+    Some((api.health_potion_status)(ctrl))
 }
 
 /// Read the main player's vitals.

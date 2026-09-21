@@ -9,11 +9,16 @@
 //! game. Step 2 (frame hook) is implemented in [`hook`] and installed from a
 //! deferred worker below.
 
+pub mod gate;
 pub mod hook;
+pub mod hotkey;
 pub mod log;
 pub mod probe;
 mod probe_table;
+pub mod runtime;
 pub mod scan;
+pub mod server;
+pub mod shared;
 pub mod state;
 pub mod win;
 
@@ -114,6 +119,18 @@ fn spawn_deferred_init() {
         .spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(3));
             hook::install();
+
+            // The server never touches the game; it only trades data with
+            // the hook through `shared`. Both get their own thread so a
+            // wedged browser cannot reach the game thread.
+            std::thread::Builder::new()
+                .name("grimlua-server".into())
+                .spawn(server::start)
+                .ok();
+            std::thread::Builder::new()
+                .name("grimlua-hotkey".into())
+                .spawn(hotkey::run)
+                .ok();
         });
     if spawned.is_err() {
         log!("could not spawn deferred init thread; no hook installed");

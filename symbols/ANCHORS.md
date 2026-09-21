@@ -138,6 +138,36 @@ Not yet exercised against: NPC dialogue, the map, and the transfer panels
 Re-verify after every game patch by re-running the scan, then update
 `UI_OPEN_OFFSET` and `UI_OPEN_VERIFIED_BUILD` together in `state.rs`.
 
+## Actions (build-order step 5)
+
+The only way grimlua affects the game. Every one is an exported game function
+called on the frame hook -- **never synthetic input**. The game therefore
+applies its own rules about cooldowns, charges and whether a potion is even
+slotted, and grimlua cannot make it do anything the player could not.
+
+| Symbol | Signature | Runtime confirmed |
+|---|---|---|
+| `?GetPlayerHotSlotCtrl@Player@GAME@@QEAAAEAVPlayerHotSlotCtrl@2@XZ` | `PlayerHotSlotCtrl& Player::GetPlayerHotSlotCtrl()` | ☑ |
+| `?ActivateHealthPotionSlot@PlayerHotSlotCtrl@GAME@@QEAAXXZ` | `void ActivateHealthPotionSlot()` | ☑ |
+| `?ActivateManaPotionSlot@PlayerHotSlotCtrl@GAME@@QEAAXXZ` | `void ActivateManaPotionSlot()` | ☑ |
+| `?GetHealthPotionStatus@PlayerHotSlotCtrl@GAME@@QEBA?AW4HotSlotOptionStatus@2@XZ` | `HotSlotOptionStatus GetHealthPotionStatus() const` | logged only |
+
+The full chain, all resolved by name:
+
+    GameEngine::Update            hook; `this` is the GameEngine*
+      -> GetMainPlayer()          -> Player*
+      -> GetPlayerHotSlotCtrl()   -> PlayerHotSlotCtrl&
+      -> ActivateHealthPotionSlot()
+
+`HotSlotOptionStatus` is an enum whose values are not yet decoded, so the
+status is written to the log for study rather than acted on. Pressing a slot
+the game considers unavailable is a no-op, exactly as it is for the keybind,
+so nothing depends on decoding it first.
+
+Neighbours worth knowing when adding actions: `ActivateHotSlot`,
+`ActivatePrimarySlot`, `ActivateSecondarySlot`, `ActivateEvadeSlot`,
+`DeactivateActiveSlot`, and `PlayerInventoryCtrl::UsePotionOfType`.
+
 ## Largest classes, for orientation
 
 | Class | Module | Exported members |

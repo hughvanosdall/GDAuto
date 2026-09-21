@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>grimlua</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+  :root {
+    --stone:      #23272a;
+    --mortar:     #0e1113;
+    --plaque:     #1a1e21;
+    --plaque-up:  #24292d;
+    --iron:       #383e43;
+    --iron-lit:   #4a5055;
+    --bone:       #cfcbbf;
+    --bone-dim:   #8e8b81;
+    --bone-faint: #6a675f;
+    --moss:       #7b9755;
+    --moss-lit:   #9ab872;
+    --moss-deep:  #3d4f2c;
+    --rust:       #c4703f;
+    --blood:      #8e3a33;
+    --blood-deep: #401814;
+    --arcane:     #3f6b8a;
+    --arcane-deep:#1b2f3f;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: 'EB Garamond', Georgia, serif;
+    font-variant-numeric: lining-nums tabular-nums;
+    color: var(--bone);
+    background-color: var(--stone);
+    background-image:
+      radial-gradient(ellipse 70% 55% at 50% 40%, transparent 35%, rgba(0,0,0,0.5) 100%),
+      radial-gradient(ellipse 30% 22% at 9% 16%, rgba(0,0,0,0.45), transparent 70%),
+      radial-gradient(ellipse 26% 20% at 91% 78%, rgba(0,0,0,0.4), transparent 70%),
+      radial-gradient(circle at 2% 96%, rgba(116,144,82,0.20), transparent 16%),
+      radial-gradient(circle at 99% 4%,  rgba(116,144,82,0.13), transparent 13%),
+      radial-gradient(circle at 46% 100%, rgba(116,144,82,0.10), transparent 11%),
+      repeating-linear-gradient(180deg, rgba(255,255,255,0.035) 4px, rgba(255,255,255,0.035) 6px, transparent 6px, transparent 108px),
+      repeating-linear-gradient(180deg, var(--mortar) 0, var(--mortar) 4px, transparent 4px, transparent 108px),
+      repeating-linear-gradient(90deg,  var(--mortar) 0, var(--mortar) 4px, transparent 4px, transparent 216px),
+      repeating-linear-gradient(90deg,  rgba(255,255,255,0.018) 0, rgba(255,255,255,0.018) 108px, rgba(0,0,0,0.06) 108px, rgba(0,0,0,0.06) 216px);
+    background-attachment: fixed;
+  }
+
+  /* ── command bar ───────────────────────────────── */
+  header {
+    position: relative;
+    display: flex; align-items: center; gap: 20px;
+    padding: 0 26px; height: 74px;
+    background: #191c1f;
+    border-bottom: 3px solid var(--mortar);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.07),
+                inset 0 -20px 30px rgba(0,0,0,0.5),
+                0 3px 12px rgba(0,0,0,0.6);
+  }
+  .bolt {
+    position: absolute; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--iron-lit);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 1px 2px #000;
+  }
+  h1 {
+    margin: 0;
+    font-family: Cinzel, serif; font-size: 25px; font-weight: 700;
+    letter-spacing: 3.5px; color: #b9b5a8; text-shadow: 0 2px 3px #000;
+  }
+  .link { display: flex; align-items: center; gap: 9px; font-size: 16px;
+          color: var(--bone-dim); font-style: italic; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--iron); }
+  .dot.live { background: var(--moss); box-shadow: 0 0 9px var(--moss); }
+  .dot.lost { background: var(--rust); box-shadow: 0 0 9px var(--rust); }
+
+  /* ── the arm switch: the loudest control on the page ── */
+  #arm {
+    display: flex; align-items: center; gap: 11px;
+    height: 44px; padding: 0 24px;
+    font-family: Cinzel, serif; font-size: 13px; font-weight: 700;
+    letter-spacing: 2.6px; cursor: pointer; border-radius: 2px;
+    background: #1b1f22; color: var(--bone-dim);
+    border: 2px solid var(--iron);
+    box-shadow: inset 0 2px 6px rgba(0,0,0,0.6);
+  }
+  #arm[aria-pressed="true"] {
+    background: var(--moss-deep); color: #dceac6; border-color: var(--moss);
+    box-shadow: inset 0 1px 0 rgba(180,210,140,0.35),
+                inset 0 -10px 16px rgba(0,0,0,0.4),
+                0 0 20px rgba(123,151,85,0.28);
+  }
+  #arm:focus-visible { outline: 2px solid var(--moss-lit); outline-offset: 3px; }
+
+  /* ── gate banner ───────────────────────────────── */
+  #gate {
+    display: flex; align-items: center; gap: 15px;
+    padding: 14px 26px;
+    border-bottom: 3px solid var(--mortar);
+    box-shadow: inset 0 2px 16px rgba(0,0,0,0.6);
+    background: #1f2418; border-top: 1px solid #47563a;
+  }
+  #gate.blocked { background: #2e1d15; border-top-color: #6b3a24; }
+  #gate.unknown { background: #2b1a17; border-top-color: #7a3228; }
+  #gate-word {
+    font-family: Cinzel, serif; font-size: 14px; font-weight: 700;
+    letter-spacing: 3.5px; color: var(--moss-lit);
+  }
+  #gate.blocked #gate-word { color: var(--rust); }
+  #gate.unknown #gate-word { color: #d4736a; }
+  #gate-why { font-size: 18px; color: #9b9c8e; font-style: italic; }
+
+  /* ── plaques ───────────────────────────────────── */
+  main {
+    max-width: 1180px; margin: 0 auto;
+    padding: 22px 26px 40px;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px;
+    align-content: start;
+  }
+  section {
+    position: relative;
+    background: var(--plaque); border: 2px solid var(--iron);
+    padding: 20px 24px;
+    box-shadow: inset 0 2px 12px rgba(0,0,0,0.75),
+                inset 0 -1px 0 rgba(255,255,255,0.05),
+                0 2px 8px rgba(0,0,0,0.5);
+  }
+  section.wide { grid-column: span 2; }
+  .stud {
+    position: absolute; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--iron-lit); box-shadow: inset 0 1px 0 rgba(255,255,255,0.3);
+  }
+  .moss-patch {
+    position: absolute; border-radius: 50%; pointer-events: none;
+    background: radial-gradient(ellipse, rgba(116,144,82,0.30), transparent 70%);
+  }
+  .head { display: flex; align-items: center; gap: 13px; margin-bottom: 18px; }
+  .head h2 {
+    margin: 0; font-family: Cinzel, serif; font-size: 13px; font-weight: 700;
+    letter-spacing: 3px; color: #a8a498;
+  }
+  .rule { flex: 1; height: 1px;
+          background: linear-gradient(90deg, var(--iron), rgba(56,62,67,0)); }
+  .aside { font-size: 15px; color: var(--bone-dim); font-style: italic; }
+
+  /* ── vitals ────────────────────────────────────── */
+  .vital-top { display: flex; align-items: baseline; gap: 11px; margin-bottom: 7px; }
+  .vital-name {
+    font-family: Cinzel, serif; font-size: 11px; letter-spacing: 2.2px;
+    color: #78756d; width: 64px;
+  }
+  .vital-cur { font-size: 28px; font-weight: 600; color: #d8d4c8; }
+  .vital-max { font-size: 15px; color: var(--bone-faint); }
+  .vital-pct { margin-left: auto; font-size: 17px; }
+  .channel {
+    height: 17px; padding: 2px; background: #0c0e10;
+    box-shadow: inset 0 0 0 1px var(--iron), inset 0 3px 7px rgba(0,0,0,0.95);
+  }
+  .channel > div { height: 100%; transition: width 120ms linear; }
+  .fill-life {
+    background: linear-gradient(180deg, var(--blood), var(--blood-deep));
+    box-shadow: inset 0 1px 0 rgba(220,150,135,0.28);
+  }
+  .fill-energy {
+    background: linear-gradient(180deg, var(--arcane), var(--arcane-deep));
+    box-shadow: inset 0 1px 0 rgba(150,200,230,0.24);
+  }
+  .gap { margin-bottom: 18px; }
+
+  /* ── potions ───────────────────────────────────── */
+  .potion { display: flex; align-items: center; gap: 16px; padding: 16px 0 14px; }
+  .potion + .potion { border-top: 1px solid #262b2f; }
+  .switch {
+    position: relative; flex-shrink: 0; width: 48px; height: 25px; padding: 0;
+    cursor: pointer; border-radius: 2px;
+    background: #1b1f22; border: 1px solid var(--iron);
+    box-shadow: inset 0 2px 5px rgba(0,0,0,0.7);
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 19px; height: 19px; background: #454b50;
+    transition: left 110ms ease, background 110ms ease;
+  }
+  .switch[aria-checked="true"] {
+    background: var(--moss-deep); border-color: var(--moss);
+    box-shadow: inset 0 2px 5px rgba(0,0,0,0.6), 0 0 10px rgba(123,151,85,0.2);
+  }
+  .switch[aria-checked="true"]::after {
+    left: 25px;
+    background: linear-gradient(180deg, var(--moss-lit), #56703a);
+    box-shadow: inset 0 1px 0 rgba(200,230,170,0.5);
+  }
+  .switch:focus-visible { outline: 2px solid var(--moss-lit); outline-offset: 3px; }
+  .potion label { font-size: 18px; width: 150px; cursor: pointer; }
+  .potion.off label, .potion.off .when { color: #78756d; }
+  .when { font-size: 16px; color: var(--bone-dim); font-style: italic; }
+  .slider-wrap { flex: 1; display: flex; align-items: center; gap: 14px; }
+  .potion.off .slider-wrap { opacity: 0.4; }
+  input[type=range] {
+    flex: 1; -webkit-appearance: none; appearance: none;
+    height: 7px; background: #0c0e10; cursor: pointer;
+    box-shadow: inset 0 0 0 1px var(--iron), inset 0 2px 4px rgba(0,0,0,0.9);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 18px; height: 21px;
+    background: linear-gradient(180deg, var(--moss-lit), #56703a);
+    border: 1px solid #262b2f;
+    box-shadow: inset 0 1px 0 rgba(200,230,170,0.6), 0 1px 3px rgba(0,0,0,0.7);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 18px; height: 21px; border-radius: 0;
+    background: linear-gradient(180deg, var(--moss-lit), #56703a);
+    border: 1px solid #262b2f;
+  }
+  input[type=range]:focus-visible { outline: 2px solid var(--moss-lit); outline-offset: 4px; }
+  .pct-out { font-size: 21px; font-weight: 600; width: 58px; text-align: right; }
+
+  /* ── session ───────────────────────────────────── */
+  .stat { display: flex; justify-content: space-between; align-items: baseline;
+          padding: 8px 0; border-bottom: 1px solid #262b2f; }
+  .stat:last-child { border-bottom: none; }
+  .stat span:first-child { font-size: 15px; color: var(--bone-dim); }
+  .stat span:last-child { font-size: 18px; font-weight: 600; }
+
+  /* ── stale ─────────────────────────────────────── */
+  body.stale main { opacity: 0.35; filter: grayscale(0.7); }
+  #lost {
+    display: none; align-items: center; gap: 12px;
+    padding: 14px 26px; background: #2b1a17;
+    border-top: 1px solid #7a3228; border-bottom: 3px solid var(--mortar);
+    font-size: 17px; color: #d4a79c; font-style: italic;
+  }
+  body.stale #lost { display: flex; }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: minmax(0, 1fr); }
+    section.wide { grid-column: span 1; }
+    header { flex-wrap: wrap; height: auto; padding: 14px 16px; gap: 12px; }
+    main { padding: 16px; }
+    .potion { flex-wrap: wrap; }
+    .potion label { width: auto; }
+  }
+</style>
+</head>
+<body class="stale">
+
+<header>
+  <span class="bolt" style="top:9px;left:11px"></span>
+  <span class="bolt" style="bottom:9px;left:11px"></span>
+  <span class="bolt" style="top:9px;right:11px"></span>
+  <span class="bolt" style="bottom:9px;right:11px"></span>
+
+  <h1>GRIMLUA</h1>
+  <span style="width:2px;height:26px;background:var(--mortar);box-shadow:1px 0 0 rgba(255,255,255,0.06)"></span>
+  <span class="link"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting…</span></span>
+  <span style="flex:1"></span>
+
+  <button type="button" id="arm" aria-pressed="false">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 2l8 4v6c0 5-3.4 9.2-8 10-4.6-.8-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/>
+    </svg>
+    <span id="arm-text">DISARMED</span>
+  </button>
+</header>
+
+<div id="gate" class="unknown">
+  <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       stroke-width="1.9" stroke-linecap="round" aria-hidden="true" id="gate-icon">
+    <circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>
+  </svg>
+  <span id="gate-word">WAITING</span>
+  <span id="gate-why">no word from the game yet</span>
+</div>
+
+<div id="lost">
+  <span class="dot lost"></span>
+  Connection to the game lost — these readings are frozen. Reconnecting…
+</div>
+
+<main>
+  <section class="wide">
+    <span class="stud" style="top:7px;left:7px"></span>
+    <span class="stud" style="top:7px;right:7px"></span>
+    <span class="stud" style="bottom:7px;left:7px"></span>
+    <span class="stud" style="bottom:7px;right:7px"></span>
+    <span class="moss-patch" style="bottom:-6px;left:38px;width:52px;height:18px"></span>
+
+    <div class="head">
+      <h2>CHARACTER</h2><span class="rule"></span>
+      <span class="aside" id="world-state">not in the world</span>
+    </div>
+
+    <div class="vital-top">
+      <span class="vital-name">LIFE</span>
+      <span class="vital-cur" id="life-cur">—</span>
+      <span class="vital-max" id="life-max"></span>
+      <span class="vital-pct" id="life-pct" style="color:var(--blood)"></span>
+    </div>
+    <div class="channel gap"><div class="fill-life" id="life-bar" style="width:0%"></div></div>
+
+    <div class="vital-top">
+      <span class="vital-name">ENERGY</span>
+      <span class="vital-cur" id="energy-cur">—</span>
+      <span class="vital-max" id="energy-max"></span>
+      <span class="vital-pct" id="energy-pct" style="color:var(--arcane)"></span>
+    </div>
+    <div class="channel"><div class="fill-energy" id="energy-bar" style="width:0%"></div></div>
+  </section>
+
+  <section>
+    <span class="moss-patch" style="top:-5px;right:26px;width:44px;height:14px"></span>
+    <div class="head"><h2>SESSION</h2><span class="rule"></span></div>
+    <div class="stat"><span>potions drunk</span><span id="s-actions">0</span></div>
+    <div class="stat"><span>held by the gate</span><span id="s-blocked" style="color:var(--rust)">0</span></div>
+    <div class="stat"><span>last action</span><span id="s-last" style="font-size:15px;font-style:italic;color:var(--bone-dim)">none yet</span></div>
+  </section>
+
+  <section class="wide">
+    <div class="head">
+      <h2>POTIONS</h2><span class="rule"></span>
+      <span class="aside">checked about twenty times a second</span>
+    </div>
+
+    <div class="potion off" id="hp-row">
+      <button type="button" class="switch" id="hp-switch" role="switch"
+              aria-checked="false" aria-label="Automatic health potion"></button>
+      <label for="hp-threshold">Health potion</label>
+      <span class="when">when life falls below</span>
+      <div class="slider-wrap">
+        <input type="range" id="hp-threshold" min="5" max="95" step="1" value="55"
+               aria-label="Health potion threshold, percent">
+        <span class="pct-out" id="hp-out">55%</span>
+      </div>
+    </div>
+
+    <div class="potion off" id="ep-row">
+      <button type="button" class="switch" id="ep-switch" role="switch"
+              aria-checked="false" aria-label="Automatic energy potion"></button>
+      <label for="ep-threshold">Energy potion</label>
+      <span class="when">when energy falls below</span>
+      <div class="slider-wrap">
+        <input type="range" id="ep-threshold" min="5" max="95" step="1" value="30"
+               aria-label="Energy potion threshold, percent">
+        <span class="pct-out" id="ep-out">30%</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <span class="moss-patch" style="bottom:-5px;right:34px;width:38px;height:13px"></span>
+    <div class="head"><h2>THE GATE</h2><span class="rule"></span></div>
+    <p style="margin:0;font-size:16px;line-height:1.5;color:var(--bone-dim);font-style:italic">
+      Nothing fires unless grimlua is armed, the game has focus, no panel is open,
+      and the cooldown has passed. If any of those cannot be established, nothing
+      fires at all.
+    </p>
+  </section>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const PORT = location.port || "7890";
+
+  // Local mirror of the server's config. Sent whole on every change.
+  let config = null;
+  // While the user is working a control, ignore the server's echo so the
+  // slider does not fight the thumb under their finger.
+  let holdUntil = 0;
+  let socket = null;
+  let lastMessage = 0;
+
+  /* ── rendering ─────────────────────────────────── */
+
+  const fmt = (n) => Math.round(n).toLocaleString();
+
+  function renderSnapshot(s) {
+    $("world-state").textContent = s.in_world ? "in the world" : "not in the world";
+
+    const v = s.vitals || {};
+    setVital("life", v.life, v.life_max);
+    setVital("energy", v.energy, v.energy_max);
+
+    $("s-actions").textContent = s.actions ?? 0;
+    $("s-blocked").textContent = s.blocked ?? 0;
+    $("s-last").textContent = s.last_action || "none yet";
+
+    renderGate(s);
+  }
+
+  function setVital(name, cur, max) {
+    const has = typeof cur === "number" && typeof max === "number" && max > 0;
+    $(name + "-cur").textContent = has ? fmt(cur) : "—";
+    $(name + "-max").textContent = has ? "of " + fmt(max) : "";
+    const pct = has ? Math.max(0, Math.min(100, (cur / max) * 100)) : 0;
+    $(name + "-pct").textContent = has ? Math.round(pct) + "%" : "";
+    $(name + "-bar").style.width = pct + "%";
+  }
+
+  const GATE_WORD = {
+    clear:      ["CLEAR", ""],
+    disarmed:   ["DISARMED", "blocked"],
+    unfocused:  ["BLOCKED", "blocked"],
+    ui_open:    ["BLOCKED", "blocked"],
+    cooldown:   ["COOLING", "blocked"],
+    no_player:  ["WAITING", "blocked"],
+    unknown:    ["UNKNOWN", "unknown"],
+  };
+
+  function renderGate(s) {
+    const el = $("gate");
+    const key = s.gate || "unknown";
+    const [word, cls] = GATE_WORD[key] || ["UNKNOWN", "unknown"];
+    el.className = cls;
+    $("gate-word").textContent = word;
+    $("gate-why").textContent =
+      key === "clear" ? "armed, focused, no panels open" : (s.gate_reason || "");
+  }
+
+  function renderConfig(c) {
+    if (Date.now() < holdUntil) return;
+    config = c;
+    $("arm").setAttribute("aria-pressed", String(!!c.armed));
+    $("arm-text").textContent = c.armed ? "ARMED" : "DISARMED";
+    applyPotion("hp", c.health_potion);
+    applyPotion("ep", c.energy_potion);
+  }
+
+  function applyPotion(prefix, rule) {
+    if (!rule) return;
+    $(prefix + "-switch").setAttribute("aria-checked", String(!!rule.enabled));
+    $(prefix + "-row").classList.toggle("off", !rule.enabled);
+    $(prefix + "-threshold").value = rule.threshold;
+    $(prefix + "-out").textContent = Math.round(rule.threshold) + "%";
+  }
+
+  /* ── sending ───────────────────────────────────── */
+
+  function send() {
+    if (!config || !socket || socket.readyState !== WebSocket.OPEN) return;
+    holdUntil = Date.now() + 600;
+    socket.send(JSON.stringify(config));
+  }
+
+  $("arm").addEventListener("click", () => {
+    if (!config) return;
+    config.armed = !config.armed;
+    $("arm").setAttribute("aria-pressed", String(config.armed));
+    $("arm-text").textContent = config.armed ? "ARMED" : "DISARMED";
+    send();
+  });
+
+  function wirePotion(prefix, key) {
+    $(prefix + "-switch").addEventListener("click", () => {
+      if (!config) return;
+      config[key].enabled = !config[key].enabled;
+      applyPotionLocal(prefix, config[key]);
+      send();
+    });
+    $(prefix + "-threshold").addEventListener("input", (e) => {
+      if (!config) return;
+      config[key].threshold = Number(e.target.value);
+      $(prefix + "-out").textContent = e.target.value + "%";
+      send();
+    });
+  }
+
+  function applyPotionLocal(prefix, rule) {
+    $(prefix + "-switch").setAttribute("aria-checked", String(rule.enabled));
+    $(prefix + "-row").classList.toggle("off", !rule.enabled);
+  }
+
+  wirePotion("hp", "health_potion");
+  wirePotion("ep", "energy_potion");
+
+  /* ── connection ────────────────────────────────── */
+
+  function connect() {
+    socket = new WebSocket("ws://127.0.0.1:" + PORT + "/ws");
+
+    socket.onopen = () => {
+      $("conn-dot").className = "dot live";
+      $("conn-text").textContent = "connected";
+    };
+
+    socket.onmessage = (ev) => {
+      lastMessage = Date.now();
+      document.body.classList.remove("stale");
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.snapshot) renderSnapshot(msg.snapshot);
+      if (msg.config) renderConfig(msg.config);
+    };
+
+    const drop = () => {
+      $("conn-dot").className = "dot lost";
+      $("conn-text").textContent = "disconnected";
+      document.body.classList.add("stale");
+      socket = null;
+      setTimeout(connect, 1000);
+    };
+    socket.onclose = drop;
+    socket.onerror = () => { try { socket.close(); } catch {} };
+  }
+
+  // Data older than a second is not live data, and a dashboard that shows
+  // stale numbers as though they were current is worse than one that is
+  // plainly broken.
+  setInterval(() => {
+    if (lastMessage && Date.now() - lastMessage > 1000) {
+      document.body.classList.add("stale");
+    }
+  }, 500);
+
+  connect();
+})();
+</script>
+</body>
+</html>
