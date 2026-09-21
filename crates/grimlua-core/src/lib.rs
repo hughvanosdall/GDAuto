@@ -9,21 +9,38 @@
 //! game. Step 2 (frame hook) is implemented in [`hook`] and installed from a
 //! deferred worker below.
 
+pub mod abi;
+pub mod db;
 pub mod gate;
 pub mod hook;
 pub mod hotkey;
+pub mod live;
 pub mod log;
 pub mod probe;
 mod probe_table;
+pub mod rules;
 pub mod runtime;
 pub mod scan;
+pub mod script;
 pub mod server;
 pub mod shared;
 pub mod state;
+pub mod trace;
 pub mod win;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
 use windows_sys::Win32::Foundation::HMODULE;
+
+/// The directory the DLL was loaded from, which is where the log and the saved
+/// config live. Recorded in [`init`] and read from the deferred worker, so the
+/// module handle does not have to be carried around.
+static SELF_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn self_directory() -> Option<PathBuf> {
+    SELF_DIR.get().cloned()
+}
 
 /// Modules whose exports the runtime resolves symbols from.
 pub const GAME_MODULES: [&str; 3] = ["Game.dll", "Engine.dll", "Widget.dll"];
@@ -74,6 +91,8 @@ pub fn init(self_module: HMODULE) {
         .unwrap_or_else(|| PathBuf::from("."));
 
     log::init(&dir);
+    let _ = SELF_DIR.set(dir);
+    install_panic_hook();
 
     log!("grimlua {} loaded", env!("CARGO_PKG_VERSION"));
     if let Some(path) = &self_path {
@@ -107,6 +126,22 @@ pub fn init(self_module: HMODULE) {
     spawn_deferred_init();
 }
 
+/// Send panic messages to `grimlua.log`.
+///
+/// The default hook writes to stderr, which inside a windowed game goes
+/// nowhere. Since panics are caught rather than fatal (see the profile note in
+/// `Cargo.toml`), losing the message would mean grimlua silently going inert
+/// with no way to find out why.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let where_ = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown location".into());
+        log!("PANIC at {where_}: {}", info);
+    }));
+}
+
 /// Install the frame hook off the loader's back.
 ///
 /// Hooking from `DllMain` would patch code pages and allocate while the loader
@@ -118,7 +153,30 @@ fn spawn_deferred_init() {
         .name("grimlua-init".into())
         .spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(3));
+
+            // Before anything spawns: the workers below run code inside this
+            // module, so the module must not be unloadable while they live.
+            if !win::pin_self() {
+                log!("could not pin the module; not starting workers");
+                return;
+            }
+
+            // Before the hook: the first tick compiles whatever config is
+            // live, and it should be the user's rules rather than the
+            // defaults. `armed` is never restored, only the rules are.
+            if let Some(dir) = self_directory() {
+                shared::load_from(&dir);
+            }
+
             hook::install();
+
+            // Watch the game's own skill calls. This is a diagnostic, and it
+            // is what will answer how a player cast actually reaches the
+            // engine -- including handing us the `ControllerPlayer*` that
+            // nothing exported returns.
+            if shared::config().trace_skills {
+                trace::install();
+            }
 
             // The server never touches the game; it only trades data with
             // the hook through `shared`. Both get their own thread so a
@@ -131,10 +189,41 @@ fn spawn_deferred_init() {
                 .name("grimlua-hotkey".into())
                 .spawn(hotkey::run)
                 .ok();
+            std::thread::Builder::new()
+                .name("grimlua-save".into())
+                .spawn(shared::run_autosave)
+                .ok();
+
+            // The skill database. Its own thread because parsing 180 MB of
+            // archives takes about half a second, and it must not be on the
+            // path of anything the game is waiting for. It reads files off
+            // disk and never touches the game, so it is a worker like any
+            // other -- the frame hook only ever sees the finished index.
+            std::thread::Builder::new()
+                .name("grimlua-db".into())
+                .spawn(build_skill_index)
+                .ok();
         });
     if spawned.is_err() {
         log!("could not spawn deferred init thread; no hook installed");
     }
+}
+
+/// Parse the game's skill database and publish it.
+///
+/// The DLL lives in `<game>d`, so the install root is its parent. The cache
+/// sits next to the DLL with the log and the config.
+fn build_skill_index() {
+    let Some(dir) = self_directory() else {
+        log!("db: cannot locate the game directory");
+        return;
+    };
+    let Some(root) = dir.parent() else {
+        log!("db: {} has no parent directory", dir.display());
+        return;
+    };
+    let index = db::load_or_build(root, &dir.join("grimlua.skills.json"));
+    shared::put_skills(index);
 }
 
 /// The PE `TimeDateStamp` of a loaded game module, used to refuse

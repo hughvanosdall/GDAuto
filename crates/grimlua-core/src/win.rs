@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::LibraryLoader::{
-    GetModuleFileNameW, GetModuleHandleW, GetProcAddress, LoadLibraryW,
+    GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW, GetProcAddress, LoadLibraryW,
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 
@@ -74,4 +75,31 @@ pub fn proc_address(module: HMODULE, name: &str) -> Option<*const c_void> {
     bytes.push(0);
     let addr = unsafe { GetProcAddress(module, bytes.as_ptr()) };
     addr.map(|f| f as *const c_void)
+}
+
+/// Pin this DLL in the process so it can never be unloaded.
+///
+/// grimlua runs several threads of its own -- the server, the hotkey pump, the
+/// autosave, the database worker -- and they execute code inside this module.
+/// A `FreeLibrary` while any of them is running unmaps that code underneath
+/// them, which is an instant access violation in someone's game.
+///
+/// Grim Dawn never unloads `dinput8.dll`, so this is belt and braces rather
+/// than a fix for an observed crash in the game. It cost three lines and it
+/// removes the whole class.
+///
+/// **Not callable from `DllMain`**: this takes the loader lock, which the
+/// loader already holds there. It runs from the deferred init thread.
+pub fn pin_self() -> bool {
+    // Any address inside this module identifies it; a function of ours will do.
+    let anchor = pin_self as *const ();
+    let mut handle: HMODULE = std::ptr::null_mut();
+    let ok = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            anchor as *const u16,
+            &mut handle,
+        )
+    };
+    ok != 0 && !handle.is_null()
 }

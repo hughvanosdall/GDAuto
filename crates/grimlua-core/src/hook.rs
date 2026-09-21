@@ -10,7 +10,8 @@
 //! work for this hook rather than calling in themselves.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use retour::GenericDetour;
@@ -43,21 +44,46 @@ pub fn frame_count() -> u64 {
     FRAMES.load(Ordering::Relaxed)
 }
 
-/// Runs on the game's own thread, once per frame. Keep it cheap and keep it
-/// incapable of panicking -- the crate aborts on panic, and aborting here
-/// takes the player's character with it.
+/// Set once a panic has escaped the runtime. grimlua then does nothing at all
+/// for the rest of the session: a bug in our tick is exactly the situation in
+/// which we should stop touching someone's hardcore character.
+static WEDGED: AtomicBool = AtomicBool::new(false);
+
+pub fn wedged() -> bool {
+    WEDGED.load(Ordering::Relaxed)
+}
+
+/// Runs on the game's own thread, once per frame.
+///
+/// **This is the boundary.** Grim Dawn calls in through an `extern "C"`
+/// function pointer, so a panic that reached this frame would be undefined
+/// behaviour at best and an aborted process at worst. Everything grimlua does
+/// per frame therefore happens inside a `catch_unwind`, and the call through
+/// to the game happens outside it — so even a panic in our own code leaves the
+/// game's tick intact.
 unsafe extern "C" fn update_hook(this: *mut c_void, arg: i32) {
     GAME_ENGINE.store(this as usize, Ordering::Release);
 
     let n = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
-    if n == 1 {
-        log!("frame hook live: GameEngine* = {this:p}");
-    }
 
     // The runtime reads state, consults the gate and performs at most one
     // action. Everything it does happens here, on the game's own thread.
-    if n % crate::runtime::TICK_FRAMES == 0 {
-        crate::runtime::tick(this, n);
+    let ours = catch_unwind(AssertUnwindSafe(|| {
+        if n == 1 {
+            log!("frame hook live: GameEngine* = {this:p}");
+        }
+        if n % crate::runtime::TICK_FRAMES == 0 && !wedged() {
+            crate::runtime::tick(this, n);
+        }
+    }));
+
+    if ours.is_err() && !WEDGED.swap(true, Ordering::Relaxed) {
+        // Logged once. Disarm as well, so that if the flag above were ever
+        // cleared there is still nothing to do.
+        let mut cfg = crate::shared::config();
+        cfg.armed = false;
+        crate::shared::put_config(cfg);
+        log!("frame hook: panicked -- grimlua is now inert for this session");
     }
 
     // Always call through. If the detour is somehow missing we would be

@@ -25,15 +25,33 @@ features = [
 ]
 
 # Unwinding across the FFI boundary into the game's C++ frames is undefined
-# behaviour, and a panic that reached the frame hook would take the process
-# with it -- which for a hardcore character means a deleted save. Abort so a
-# bug cannot unwind into Grim Dawn.
+# behaviour, and a panic that reached the frame hook must never get there.
+# There are two ways to guarantee that, and this project has used both:
+#
+#   panic = "abort"   -- nothing can unwind because nothing unwinds. Simple,
+#                        and it was the original choice. But it makes *every*
+#                        panic fatal to the game, which for a hardcore
+#                        character means a deleted save.
+#   panic = "unwind"  -- plus `catch_unwind` at our own boundary, which is
+#                        `hook::update_hook`. A panic then stops grimlua and
+#                        leaves Grim Dawn running.
+#
+# The second is strictly stronger, and abort turned out to be unworkable
+# besides: mlua signals an error from a Rust callback by longjmping out
+# through `lua_error`, which under `panic = "abort"` on MSVC trips
+# `panic_cannot_unwind` and kills the process. That path is exactly the script
+# instruction-budget guard, so with abort the mechanism protecting the game
+# from an endless loop was itself the thing killing it.
+#
+# The obligation this creates: **no panic may cross an `extern` boundary.**
+# The frame hook catches; the proxy's exports are naked tail-jumps with no
+# Rust frame to unwind; mlua catches its own callbacks.
 [profile.release]
-panic = "abort"
+panic = "unwind"
 opt-level = 2
 lto = true
 codegen-units = 1
 strip = false      # keep symbols; we attach a debugger to this
 
 [profile.dev]
-panic = "abort"
+panic = "unwind"

@@ -56,6 +56,8 @@ game_api!(GameApi {
         = "?ActivateManaPotionSlot@PlayerHotSlotCtrl@GAME@@QEAAXXZ",
     health_potion_status: unsafe extern "C" fn(*mut c_void) -> i32
         = "?GetHealthPotionStatus@PlayerHotSlotCtrl@GAME@@QEBA?AW4HotSlotOptionStatus@2@XZ",
+    energy_potion_status: unsafe extern "C" fn(*mut c_void) -> i32
+        = "?GetManaPotionStatus@PlayerHotSlotCtrl@GAME@@QEBA?AW4HotSlotOptionStatus@2@XZ",
     get_current_life: unsafe extern "C" fn(*mut c_void) -> f64
         = "?GetCurrentLife@Character@GAME@@QEBA?BNXZ",
     get_life_limit: unsafe extern "C" fn(*mut c_void) -> f32
@@ -236,7 +238,7 @@ pub unsafe fn drink_energy_potion(engine: *mut c_void) -> bool {
 }
 
 /// Raw `HotSlotOptionStatus` for the health slot. The enum's meaning is not
-/// yet known, so this is logged for study rather than acted on.
+/// yet known, so this is reported for study rather than acted on.
 ///
 /// # Safety
 /// As [`main_player`].
@@ -244,6 +246,30 @@ pub unsafe fn health_potion_status(engine: *mut c_void) -> Option<i32> {
     let api = api()?;
     let ctrl = hotslot_ctrl(engine)?;
     Some((api.health_potion_status)(ctrl))
+}
+
+/// Raw `HotSlotOptionStatus` for the energy slot. See
+/// [`health_potion_status`].
+///
+/// # Safety
+/// As [`main_player`].
+pub unsafe fn energy_potion_status(engine: *mut c_void) -> Option<i32> {
+    let api = api()?;
+    let ctrl = hotslot_ctrl(engine)?;
+    Some((api.energy_potion_status)(ctrl))
+}
+
+/// Both potion slot statuses, resolving the hot-slot control once.
+///
+/// # Safety
+/// As [`main_player`].
+pub unsafe fn potion_statuses(engine: *mut c_void) -> Option<(i32, i32)> {
+    let api = api()?;
+    let ctrl = hotslot_ctrl(engine)?;
+    Some((
+        (api.health_potion_status)(ctrl),
+        (api.energy_potion_status)(ctrl),
+    ))
 }
 
 /// Read the main player's vitals.

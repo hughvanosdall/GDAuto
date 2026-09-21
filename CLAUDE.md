@@ -4,9 +4,20 @@ A single DLL that loads into Grim Dawn, parses the game's skill database, runs
 a user-configured skill priority list against live game state, and serves a
 local web UI for building those priority lists visually.
 
-Status: build-order steps 0–3 done and confirmed in a live game — symbol
-index, proxy DLL, frame hook, live health read. See README.md for current
-state and `symbols/ANCHORS.md` for the confirmed entry points.
+Status: build-order steps 0–5 done and confirmed in a live game — symbol
+index, proxy DLL, frame hook, live health read, UI-open gate, local web UI
+taking real actions. Step 6 (the `.arz`/`.arc` parsers and the skill index),
+step 7 (mlua) and the form half of step 8 are built and exercised offline but
+**not yet watched running inside the game**. See README.md for current state
+and `symbols/ANCHORS.md` for the confirmed entry points.
+
+**The web UI's design is not described here.** It lives in a Design-canvas
+artifact the user maintains — "grimlua Web UI — Layout Explorations", option A,
+"stone and moss". Read it with the Artifact tool before building or changing
+the UI. Its notes deliberately override parts of this document; where the two
+disagree, the artifact wins and this file should be corrected. The page now
+implements option A: four tabs, the stone-and-moss dressing, and one-line rule
+rows.
 
 **No memory offsets were ever needed.** Grim Dawn ships modding-enabled builds
 that export ~31,600 mangled C++ symbols; see "The export table" below. That
@@ -24,8 +35,11 @@ x64/Grim Dawn.exe
     │   ├── safety gate    one veto point for every action         [built]
     │   └── runtime tick   evaluate, then at most one action       [built]
     ├── shared state ───  snapshot out, config in; no game pointers [built]
-    ├── .arz parser ────  skills, durations, costs, icons
-    ├── mlua ───────────  sandboxed priority-list evaluation
+    ├── live layer ─────  skills the character has, combat, casting [built]
+    ├── rules → Lua ────  typed IR, code generator, source map      [built]
+    ├── mlua ───────────  sandboxed priority-list evaluation        [built]
+    ├── .arz/.arc ──────  skill index: names, classes, timings      [built]
+    │                     (own worker thread; icons still to do)
     └── 127.0.0.1:7890 ─  own thread, never calls into the game    [built]
         ├── HTTP ──────── the UI page (+ skill icons later)        [built]
         └── WebSocket ─── live state out, config in                [built]
@@ -72,15 +86,59 @@ game at startup with no dialog, no WER report and no crash dump. `+crt-static`
 in `.cargo/config.toml`; our imports are now kernel32 and ntdll only. More
 generally: **take nothing from the host process that we can bring ourselves.**
 
+**Unwind, and catch at our own boundary.** A panic must never cross into Grim
+Dawn's C++ frames. The original answer was `panic = "abort"`, which guarantees
+that by making every panic fatal — including to the player's hardcore
+character. It is now `panic = "unwind"` with `catch_unwind` wrapping everything
+inside `hook::update_hook`, so a panic stops grimlua and leaves the game
+running. That change was forced as well as preferred: mlua signals an error
+from a Rust callback by longjmping out through `lua_error`, which under abort
+trips `panic_cannot_unwind` and kills the process — so the script
+instruction-budget guard, the one thing protecting the game from an endless
+loop, *was itself* the thing killing the game. The obligation this creates is
+that no panic may escape an `extern` boundary: the frame hook catches, the
+proxy's exports are naked tail-jumps with no Rust frame, and mlua catches its
+own callbacks. `examples/runaway.rs` is the regression check, and it cannot be
+a unit test because Cargo ignores the `panic` setting for the test profile.
+
+**Pin the module; never let it be unloaded.** grimlua runs threads of its own
+-- server, hotkey pump, autosave, database worker -- and they execute code
+inside the DLL. A `FreeLibrary` while any of them is live unmaps that code
+underneath them, which is an access violation in someone's game. The deferred
+init thread calls `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN`
+before spawning anything, and refuses to start the workers if that fails. Grim
+Dawn never unloads `dinput8.dll`, so this is belt and braces -- but it was
+found by a harness that *did* unload it, and it segfaulted every time.
+
+Pinning happens on the deferred thread, not in `DllMain`: `GetModuleHandleEx`
+takes the loader lock, which the loader already holds there.
+
 **Nothing heavy in `DllMain`.** It runs under the loader lock. No hooks, no
 large stack frames (a 64 KB buffer there is a silent stack overflow waiting to
 happen on a small game thread), no work beyond recording a handle and opening
 a log. The frame hook is installed from a worker thread, which cannot begin
 executing until the loader lock is released.
 
-**Config hot-applies.** Edit in the browser → websocket → runtime swaps the
-active list next frame. No restart, no reload command. Retrofitting this is
-painful; building for it is easy.
+**Config hot-applies.** Edit in the browser → websocket → runtime recompiles
+and swaps the active script next frame. No restart, no reload command.
+Retrofitting this is painful; building for it is easy.
+
+**Rules persist, `armed` does not.** The config is saved to
+`grimlua.config.json` beside the DLL by a one-second autosave thread and
+restored at startup. Nobody rebuilds a priority list every launch, so without
+this the scripting layer would be unusable. `armed` is forced false both when
+loading and when saving — a tool that remembers it was armed is a tool that
+acts before its owner is watching.
+
+**A config that will not load must never be overwritten.** This was learned the
+hard way: a stray byte-order mark made the file unparseable, the loader fell
+back to defaults, and the autosave wrote those defaults over the user's rules a
+second later. A file we cannot understand is still their work. So a failed load
+now sets a flag that blocks autosave entirely, renames the file to
+`grimlua.config.bad.json` rather than replacing it, and clears only when a
+config arrives from the browser — by which point someone has looked at the
+state of it. The loader also tolerates a BOM, because hand-editing that file is
+a reasonable thing to do and Notepad leaves one.
 
 ## Decisions and rejected alternatives
 
@@ -121,6 +179,22 @@ behaviour lives in `grimlua-core`, which knows nothing about how it was
 loaded, and the proxy is a thin shim around `init()`. But it is Steam-only,
 which works against later GOG and Epic support that a proxy gets for free, so
 it stays a fallback rather than the plan.
+
+**Invoke skills directly; never press the hot bar.** An earlier version cast
+skills through `PlayerHotSlotCtrl::ActivateHotSlot`, naming a bar position.
+That was wrong and it was rejected outright: going through a slot re-imposes
+exactly the limitations an external macro has — the skill has to be bound to
+the bar, the binding has to be known, and a priority list ends up naming a bar
+index instead of a skill. Casting directly, independent of the bar and of the
+player's key bindings, **is the main advantage of being inside the process**,
+and throwing it away to save a little reverse engineering is a bad trade.
+
+So a rule names a *skill*, as a database record path. `SkillManager::
+FindSkillId` turns that into a runtime id, `IsSkillValidForUse` is the game's
+own answer on whether it can be cast this instant, and `Character::
+ActivateSkill` casts it. Potions stay as they were: `ActivateHealthPotionSlot`
+is the game's own potion entry point, not a bar index, so it was never the
+thing being objected to.
 
 **Rust, specifically for `mlua`.** The earlier Python prototype used lupa,
 whose whole purpose is reflective Python↔Lua bridging — a script reaching any
@@ -163,6 +237,14 @@ Consequences:
 - **Resolve by mangled name via `GetProcAddress`.** Not signature scanning,
   not pointer chains. An exported name survives patches unless Crate actually
   renames the function; a signature may not survive a recompile.
+- **Check the module, not just the name**, and run
+  `python tools/check_symbols.py` before shipping. A resolve block is
+  all-or-nothing, so one name that does not resolve blanks every feature in the
+  block, silently and with no error. That is not hypothetical: `GAME::Name`'s
+  constructor is exported from **Engine.dll**, the lookup searched Game.dll, and
+  the result was the skill list, the combat flags and the DPS readout all going
+  blank together in a live game. Group symbols by the feature they serve so a
+  loss stays local, and name the module each one belongs to.
 - `tools/dump_exports.py` harvests all of it into `symbols/symbols.json`;
   `tools/query_symbols.py` searches it. Regenerate after a game patch — the
   runtime logs a warning at startup when the loaded modules no longer match
@@ -179,6 +261,15 @@ in RCX on x64, so hooking `GameEngine::Update(int)` yields the `GameEngine*`
 with no pointer chain to resolve. `GetMainPlayer()` reaches the player from
 there, and health is a `const` getter call rather than a struct offset. No
 struct layouts have had to be reversed at all.
+
+**Two C++ types are read by layout, and only two.** `abi.rs` knows how MSVC
+lays out `std::string` and `mem::vector<T>`, because the game hands both back
+across the export boundary — `Skill::GetDisplayNameTag` returns a string, and
+`SkillManager::GetSkillList` returns a vector. This is a much weaker assumption
+than a struct offset: the layouts belong to Microsoft's standard library, not
+to Grim Dawn, so they do not move when Crate recompiles. Every read is
+validated (size ≤ capacity, sane bounds, correct alignment, printable bytes)
+and yields `None` rather than a guess. Nothing there writes.
 
 **Keep an external read mode behind a trait.** ~50 extra lines, and it lets you
 iterate on offsets without restarting the game and gives a safe fallback when
@@ -209,10 +300,27 @@ that lets the server reach a `GameEngine*`.**
 
 `runtime::tick(engine, frame)`, every 6 frames (~20Hz at 120fps):
 
-1. read vitals through the game's own `const` accessors
-2. `gate::evaluate` → a `Gate`
-3. if and only if `Gate::Clear`, pick **one** action and perform it
-4. publish a `Snapshot` for the browser
+1. recompile if the config revision moved
+2. read vitals and hot-slot statuses through the game's own `const` accessors
+3. `gate::evaluate` → a `Gate`
+4. run the script, if the gate is clear or a browser is watching — it is a pure
+   function of what step 2 gathered and cannot touch the game
+5. if and only if `Gate::Clear`, validate the action it named and perform it
+6. publish a `Snapshot` and a `ScriptStatus` for the browser
+
+All of it inside a `catch_unwind` in `hook::update_hook`. A panic there stops
+grimlua for the session and leaves the game running.
+
+**Not everything runs at tick rate.** The character's skill list is re-read
+every 2 s and DPS every 250 ms, both cached in between. Two reasons, and the
+first is the important one: walking the skill list is the only code in the
+project that reads a game container by assumed layout, so every call is
+exposure that buys nothing when the answer changes on levelling and gear swaps
+rather than per frame. The second is cost -- `CalculateDps` is the character
+sheet's own calculation, and the tag-to-record join was several million string
+comparisons a second before it was turned into a map built once per database
+revision. If the skill list comes back unreadable five times running, the
+reader backs off to every 30 s and says so in the log.
 
 ### The gate
 
@@ -224,38 +332,80 @@ UI flag cannot be trusted on the running build — blocks everything.
 `armed` defaults to **false on every launch**. A tool that arms itself acts
 before its owner is watching.
 
-### Where the script evaluator plugs in
+### The script evaluator, as built
 
-`runtime::choose_action(&Config, &Vitals) -> Option<Action>` is a hardcoded
-stand-in for the priority list: ordered checks, first match wins, returns at
-most one action. **That signature is the contract mlua has to satisfy.**
-
-Four things the scripting layer must preserve:
+The hardcoded `choose_action` stand-in is gone; `script.rs` is a Lua call with
+the same contract. The four properties it had to preserve, and how:
 
 1. **A script returns intent, it does not act.** `Action` is a closed enum the
-   host owns. A script names an action; the host validates it and performs it.
-   Scripts never receive a function pointer or a game pointer.
-2. **At most one action per tick.** The gate serialises everything, so
-   "do A then B this tick" is not expressible. Returning a list would be a
-   design error, not a feature.
-3. **The gate runs before the script and cannot be bypassed.** A script is not
-   consulted at all when the gate is closed, so there is no per-call opt-out to
-   forget to check.
-4. **A script that misbehaves must not stall the frame hook.** mlua exposes
-   Lua's debug hook; use it for an instruction-count limit. This runs on the
-   game's render thread — a hang here is a hang in the game.
+   host owns. The VM is handed a table of plain numbers, built on the frame
+   hook *before* Lua gets control, and returns an action *name* which the host
+   parses and may refuse. There is **no host function in the environment that
+   can reach the game** — not even indirectly — so a script is a pure function
+   from a snapshot to a token. `print` is the only host function at all, and it
+   reaches a ring buffer.
+2. **At most one action per tick.** `choose` returns one token. A second return
+   value names the rule, which is how per-rule cooldowns and the editor's live
+   highlight work.
+3. **The gate cannot be bypassed.** `runtime::perform` is reachable from
+   exactly one place: inside the `Gate::Clear` branch.
+4. **A misbehaving script must not stall the frame hook.** Lua's count hook is
+   **re-armed before every call** (`lua_sethook` resets the countdown, so a
+   call inherits a whole budget rather than the remains of the last one), plus
+   a 4 MB VM memory ceiling.
+
+**One refinement to point 3.** The original rule was that a script is not
+consulted at all when the gate is closed. That is relaxed for one case: when a
+browser is connected, the script is evaluated even while blocked, so the editor
+can show which rule is currently winning while you are still writing it — which
+is precisely when you do not want to be armed. Nothing about who may *act*
+changes, because evaluation cannot touch the game. Without it the live feedback
+would only work while armed.
+
+The sandbox is built by subtraction: `math`, `string` and `table` only, then
+`load`, `loadstring`, `dofile`, `loadfile`, `require`, `package`, `io`, `os`,
+`debug`, `newproxy`, `collectgarbage`, `string.rep` and `string.dump` removed
+by name. Removing `rep` from the `string` table also removes it from the shared
+string metatable, so `("x"):rep(n)` goes with it.
+
+### The two front ends
+
+`rules.rs` holds the IR and one code generator; `shared::ScriptMode` picks
+which front end owns the script.
+
+* **Rules mode.** An ordered `Vec<Rule>`, each with conditions joined by `and`,
+  one action, and a per-rule cooldown. `rules::generate` emits the Lua *and* a
+  source map (rule id → line), which the UI uses to badge each rule with its
+  line and to light up the line that just fired.
+* **Script mode.** The user owns the Lua. Generation stops. Both are kept in
+  the config, so switching back and forth loses nothing — but there is no
+  decompiler and there will not be one.
+
+`Config::sanitize` is the single trust boundary for both. The editor is a
+client like any other; a hand-written websocket frame or an edited config file
+reaches exactly the same code, so every limit is enforced there once.
 
 ### Adding an action
 
-1. add a variant to `runtime::Action` and a label for it
-2. resolve the exported game function in `state.rs`'s `game_api!` block
-3. call it from `runtime::perform`
+1. add a variant to `runtime::Action`, with a token and a label
+2. add the matching `rules::ActionSpec` variant so the form builder can emit it
+   — the two must agree on the token spelling, which `runtime`'s tests check
+3. resolve the exported game function in `state.rs`'s `game_api!` block
+4. call it from `runtime::perform`
+5. add it to `actionChoices()` in `web/index.html`
 
 Actions must be **exported game functions**, never synthetic input. The potion
 rules call `PlayerHotSlotCtrl::ActivateHealthPotionSlot`, the same entry point
 the keybind reaches, so the game applies its own rules about cooldowns and
 charges and grimlua cannot make it do anything the player could not. See
 `symbols/ANCHORS.md`.
+
+**Skill-bar slots are the first action shipped unconfirmed.**
+`ActivateHotSlot(unsigned int, bool, bool)` is exported like the rest, but the
+two flags are a guess (`false, false`) and the game does not bounds-check the
+index against the bar. So the whole feature is off until the user switches it
+on and states how many slots their bar has, and `Config::allows_slot` refuses
+any slot action while it is off. Confirm it live, then take this paragraph out.
 
 ### Config and hot-apply
 
@@ -268,6 +418,46 @@ That is what "no restart, no reload command" means in practice.
 One page, served from `src/web/index.html` and embedded with `include_str!`.
 Vanilla JS, no build step, no framework. It renders stale data greyed out and
 labelled rather than letting frozen numbers pass as live.
+
+Option A, as built: four tabs — **DASHBOARD**, **RULES**, **SCRIPTS**,
+**LOG** — over a shared command bar and gate banner.
+
+* **DASHBOARD** — vitals, a four-tile row (DPS, offense, defense, armour), the
+  nine resistances with a tick at the 80 cap, combat state, the potion rules,
+  and the script's state.
+* **RULES** — the priority list as numbered one-line rows: toggle, name, arrow,
+  action, and a badge showing either the generated line number or FIRING. A bad
+  rule is marked in rust with the reason under it.
+* **SCRIPTS** — the compiled Lua with the firing line highlighted, or the
+  hand-written editor, plus the `print` console.
+* **LOG** — what grimlua did and what stopped it, colour-coded by kind.
+
+**Numbers that are not read are shown blank, never invented.** Offense, defense
+and armour need the character-attribute enum, which is not in the export table;
+the resistances need `GetAllDefenseAttributes`, whose
+`CombatAttributeAccumulator` argument has not been reversed. Those tiles say
+`—` and the panel says why. Only DPS is wired, through `Player::CalculateDps`.
+This is the same rule the original document stated for the same numbers: a
+dashboard that invents values is worse than one that admits a gap.
+
+**APPLY does not gate hot-apply.** Edits still go out on a short debounce by
+themselves. The button reports whether anything is still in flight and sends it
+immediately when clicked, which is what the design's APPLY means next to a
+runtime that swaps the list next frame.
+
+Two habits worth keeping when extending it:
+
+* **Heavy fields are pushed on change, not on the clock.** The config, the
+  compiled source and the console go out only when they differ from what that
+  connection was last sent; only the snapshot and a few counters go at 10Hz.
+* **The page recognises its own echo.** Every edit mutates a local mirror of
+  the config and sends it; when the server echoes it back, a key-sorted
+  stringify comparison tells the page it is looking at its own change, and the
+  DOM is left alone. Without that, the rules list would rebuild under the
+  caret every time someone typed a rule name.
+
+`cargo run --example offline` serves this page against a fake game, which is
+how it is developed. `examples/runaway.rs` is the sandbox containment check.
 
 Deliberately **not** shown: DPS and resistances. Both are reachable
 (`Player::CalculateDps`, `Character::GetAllDefenseAttributes`) but are not
@@ -298,13 +488,45 @@ format. Use it now to explore; the shipped DLL parses natively. References:
 atom0s's `grimarz`/`grimarc`, ARZExplorer in TQVaultAE (works because Grim Dawn
 runs on the Titan Quest engine).
 
-Three gotchas:
-1. Names aren't in records — `.dbr` holds tags like `tagSkillNameB011`, strings
-   live in `text_en`. Mods ship their own tag files.
+### As built
+
+`db/arz.rs`, `db/arc.rs` and `db/skills.rs`. Both formats were pinned down
+against the shipped files by `tools/arz_probe.py` and `tools/arc_probe.py`,
+which stay in the repo as stdlib-only reference implementations to check the
+Rust against. 1,403 skills across the base game and three expansions in about
+650 ms, cached to `grimlua.skills.json` beside the DLL and keyed on the size
+and mtime of every archive, so a patch or a newly enabled mod rebuilds it
+without anyone asking.
+
+Layout notes worth not rediscovering:
+
+- `.arz`: 24-byte header, then payload, then the record table, then the string
+  table. `record_start + record_size == string_start` exactly, which is a good
+  assertion to keep — it turns a wrong guess into an error instead of a table
+  of plausible nonsense.
+- `.arc`: the **string table sits between** the part table and the file
+  entries, not after them. Getting that order wrong yields entries with empty
+  names and sizes that are ASCII read as integers.
+
+All three gotchas were real:
+
+1. Names aren't in records — `.dbr` holds tags like `tagClass03SkillName04A`,
+   strings live in `text_en`. Handled; mods ship their own tag files and later
+   archives overwrite earlier ones.
 2. `.tpl` templates are the schema; each `.dbr` declares its `templateName`.
-3. Records chain — buff skills point at a separate buff record, and many values
-   are arrays indexed by skill rank. Resolving "Pneumatic Burst duration at rank
-   12" is a traversal, not a field read.
+   Not needed so far: field names come through in the record itself.
+3. **Records chain, and this one bites hardest.** Some castable skills are four
+   fields and a pointer: `Blood of Dreeg` is a `Skill_BuffRadius` record whose
+   only content is `buffSkillName`, pointing at a `SkillBuff_Passive` record
+   that holds the name, the icon, the 12s cooldown and the 60s duration. Read
+   naively, the game's most famous buff looks like an uncastable passive. The
+   collector resolves through the link but keeps the *parent* as the castable
+   identity. Many values are also arrays indexed by rank, so rank 1 is what the
+   picker shows and resolving a specific rank stays a traversal.
+
+`skills::Kind` — `Castable`, `Passive`, `Buff`, `Modifier` — is what produces
+the editor's "that is a passive, it cannot be cast" message at the point of the
+mistake.
 
 ## Priority lists, not flowcharts
 
@@ -331,6 +553,19 @@ pins — but has no exec pins. Settled points:
 - **Ship a form-based rule builder first** ("When [health below] [55%] → [drink
   flask]"). Same IR, same codegen, one week, actually shippable. The canvas
   becomes a second front end on a proven backend.
+
+**The form builder is built** (`rules.rs` plus the PRIORITY LIST panel), and
+the settled points above survived contact: IR then Lua, one direction only, and
+the source map is a `Vec<LineMark>` pushed over the existing websocket. Two
+things the canvas will inherit rather than invent:
+
+- The generator is in Rust and there is exactly one of it. The browser never
+  builds Lua; when the Lua editor needs "start from my rules", the host sends
+  the generated text.
+- `Config::sanitize` clamps everything a client can send before it reaches the
+  generator. A canvas is another untrusted client, not a privileged one.
+
+Still open for the canvas: `Skill` as a pin type, which needs step 6.
 
 Sharing trust tiers: a graph using only built-in and DB-derived nodes is pure
 data, safe by construction, no sandbox needed. Embedded Lua nodes and raw
@@ -454,26 +689,85 @@ Each step proves the previous one. Don't skip ahead to the UI.
 5. **HTTP + websocket** — ✅ confirmed. Also the first step that *acts*:
    auto-potions run through the gate on the frame hook. Global hotkey
    (Ctrl+Shift+G) opens the UI, standing in for step 9
-6. `.arz` parser and skill index
-7. mlua and the priority list evaluator
-8. Web editor
+6. **`.arz` parser and skill index** — ✅ built, verified against the
+   installed game. Icons (`.tex` → PNG) are the one piece still outstanding
+7. **mlua and the priority list evaluator** — ✅ built, exercised offline.
+   Sandboxed Lua 5.4 compiled and run on the frame hook under a per-call
+   instruction budget. Not yet watched running inside the game
+8. **Web editor** — ✅ form half built: ordered rules, conditions, per-rule
+   cooldowns, a Lua view with the firing line highlighted, a hand-written-Lua
+   mode and a `print` console. The node canvas is still to come, as a second
+   front end on the same IR
 9. Escape menu button
+
+### Open, as of the last session
+
+- **Casting without the hot bar.** The only exported player-cast path is
+  `ActivateHotSlot`. Unresolved, and the next thing to pick up. See "Casting a
+  skill" above and `symbols/ANCHORS.md`.
+- **The dashboard's numbers.** DPS is wired. Offense, defense, armour and the
+  nine resistances are not: `GetBaseCharAttribute` turns out to return *base*
+  values, so the modified/total accessor still has to be found. Shown blank
+  with the reason rather than guessed.
+- **Skill icons.** `.tex` inside `.arc`, close to DDS with a custom header.
+  Cosmetic, deferred.
+- **`buff_active`.** Plumbed end to end through the IR and the sandbox, but
+  always reads false: `SkillManager::IsSkillBuffActive` is resolved and not yet
+  called.
 
 Steps 1–5 are the risky infrastructure and end with something visibly working:
 a browser tab showing your health updating live from inside the game. **That
 point has been reached** — the architecture is proven end to end, including a
 real action taken through the safety gate.
 
+Step 7 was mostly the sandbox, not the language. The evaluator itself is a
+`Function::call`; the work was making a runaway script survivable, which turned
+out to require changing the panic strategy (see "Unwind, and catch at our own
+boundary" above). Budget for that shape of problem rather than for Lua.
+
 Steps 0–4 turned out far cheaper than this list implies, because the export
 table removed nearly all the offset hunting. Step 4 was the first to need any:
 no disassembler, but one byte that had to be found by diffing memory rather
 than read from a name.
 
-**On tooling.** Nothing so far has needed Ghidra or Cheat Engine. Three
+**Casting a skill: the engine's only exported path is the hot bar.** A trace
+of eight candidate entry points, with the player pressing a skill key, fired
+exactly one: `PlayerHotSlotCtrl::ActivateHotSlot(slot, false, false)`.
+`Character::ActivateSkill`, `Character::StartSkill`,
+`ControllerPlayer::InstantSkillAction`, `SendSkillAction` and the controller
+state machine were all silent, which is why calling them did nothing — they are
+not on the player's path. Everything between the slot and the effect is inlined
+or internal.
+
+Everything *up to* the cast does work by name: a record path resolves through
+`FindSkillId`, and `IsSkillValidForUse` is the game's own answer on whether it
+can be cast now. Both confirmed live.
+
+**This is unfinished, and deliberately so.** The requirement — a priority list
+names a skill, and casting does not depend on the bar — has not been met, and
+using the bar would not meet it. Two routes remain: resolve skill to slot at
+runtime and press that slot (works, but the skill must be on the bar), or
+decompile `ActivateHotSlot` and follow it to whatever actually performs the
+cast. The second is the first genuine Ghidra job in this project. See
+`symbols/ANCHORS.md` for the trace output and the symbols involved.
+
+**On tooling.** Nothing so far has needed Ghidra or Cheat Engine. Four
 techniques did the work, in increasing cost: search the export table; call
 exported `const` getters live from the frame hook and watch what changes
-(`probe.rs`); diff the interior of objects we can already name (`scan.rs`).
-Prefer them in that order. A memory scanner yields an absolute address that
+(`probe.rs`); **detour the game's own functions and watch it call them**
+(`trace.rs`); diff the interior of objects we can already name (`scan.rs`).
+Prefer them in that order.
+
+The third is new and earned its place immediately. Being *inside* the process
+means a question like "how does the game cast a skill" does not have to be
+reasoned about at all — hook every candidate, press the key, read the log. One
+run ruled out seven of eight hypotheses and confirmed the arguments of the
+eighth, which no amount of reading demangled signatures had managed. Two rules
+make it trustworthy: **log whether each hook installed**, so silence is
+unambiguous, and declare the hooks uniformly as four integer arguments rather
+than reconstructing prototypes — on x64 the first four arrive in RCX, RDX, R8
+and R9 whatever their types, and inventing a signature for a function that may
+not even be on the path is the wrong way round. A memory scanner yields an absolute address that
 dies at the next patch, whereas scanning inside a named object yields an
 offset from it. Reach for Ghidra when the question is what code *does* rather
 than what a value *is* — realistically the `.dbr` record loader and the
