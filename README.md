@@ -6,6 +6,9 @@ One DLL. It reads the game's own state, evaluates a priority list you build in
 a browser, and presses the game's own buttons — on the game's own thread, with
 a single veto point that everything has to pass through.
 
+![The dashboard: vitals, combat state, and the numbers that are not read yet
+shown blank rather than guessed](docs/screenshots/dashboard.png)
+
 ---
 
 ## What it actually is
@@ -66,11 +69,22 @@ happens per evaluation, about twenty times a second, because the gate
 serialises everything; a rule that tried to do two things would silently drop
 one.
 
+![The priority list: rule 1 firing, rule 3 warned about a skill this character
+does not have, rule 4 refused because it names a passive](docs/screenshots/rules.png)
+
+A rule that cannot work says so where you wrote it. Naming a skill your
+character does not have is a warning; naming a passive, which can never be
+cast, is an error — and both are known because the editor reads the game's
+database and your actual skill list, not a hand-maintained list.
+
 Rules compile to Lua rather than being interpreted directly, which means the
 form builder and a hand-written script are the same thing downstream. You can
 switch to the Lua and take ownership of it whenever you like. The generated
 source is shown with the firing line lit up live, so the rule you built and the
 code that runs are never two separate mysteries.
+
+![The generated Lua, with each rule's line number shown on its row in the
+editor](docs/screenshots/scripts.png)
 
 The sandbox is built by subtraction: `math`, `string` and `table`, then every
 escape hatch removed by name. A script is handed a table of plain numbers and
@@ -110,6 +124,7 @@ launch. `armed` never does.
 cargo run --example offline              # a fake Grim Dawn behind the real UI
 cargo run --release --example runaway    # the sandbox containment check
 python tools/check_symbols.py            # every symbol resolves, in its module
+python tools/screenshots.py              # re-shoot the images in this README
 ```
 
 `offline` serves the genuine UI, config path, code generator, skill database
@@ -120,6 +135,11 @@ and it proves nothing whatsoever about the frame hook or any game call.
 sandbox and checks the process survives. It cannot be a unit test: Cargo
 ignores the `panic` profile setting for tests, and that setting is exactly what
 this exercises.
+
+The screenshots above are captured by `tools/screenshots.py` against that same
+offline simulator, so they are the real page rendering real UI code — only the
+vitals behind it are invented. Re-run it after changing the interface rather
+than letting the README drift.
 
 `check_symbols.py` matters more than it looks. A symbol resolve block is
 all-or-nothing, so one name that fails to resolve blanks every feature in the

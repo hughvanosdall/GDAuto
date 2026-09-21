@@ -828,11 +828,23 @@
     return out;
   }
 
-  const actionChoices = (keep) => [
-    ["health_potion", "Drink health potion"],
-    ["energy_potion", "Drink energy potion"],
-    ...skillChoices(keep, true).map(([p, label]) => ["skill:" + p, "Cast " + label]),
-  ];
+  function actionChoices(keep) {
+    const out = [
+      ["health_potion", "Drink health potion"],
+      ["energy_potion", "Drink energy potion"],
+      ...skillChoices(keep, true).map(([p, label]) => ["skill:" + p, "Cast " + label]),
+    ];
+    /* A rule can already name a skill that cannot be cast -- a passive picked
+       by mistake, or one from a shared list. The picker offers only castable
+       skills, so without this the select falls back to showing the raw record
+       path, which is the least helpful thing it could say at precisely the
+       moment the user needs to understand what is wrong. */
+    const named = keep && byPath.get(keep);
+    if (named && !named.castable) {
+      out.push(["skill:" + keep, "Cast " + skillLabel(named) + "  (cannot be cast)"]);
+    }
+    return out;
+  }
 
   function option(value, label, selected) {
     const el0 = document.createElement("option");
